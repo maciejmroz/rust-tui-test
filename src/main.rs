@@ -1,13 +1,15 @@
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, KeyCode};
 use rand::rngs::ThreadRng;
 use rand::Rng;
-use ratatui::layout::Layout;
 use ratatui::layout::{Alignment, Constraint};
+use ratatui::layout::{Layout, Margin};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, Cell, Row, Table};
+use ratatui::widgets::{
+    Block, Borders, Cell, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+};
 use ratatui::Frame;
-use std::cmp::max;
+use std::cmp::{max, min};
 use std::ops::RangeInclusive;
 use textwrap::Options;
 
@@ -74,6 +76,18 @@ struct AppState<'a> {
     currency_symbol: String,
 }
 
+#[derive(PartialEq)]
+enum MarketDataActivePanel {
+    MarketData,
+    LatestNews,
+}
+
+struct UIState {
+    market_data_active_panel: MarketDataActivePanel,
+    market_data_scroll_pos: usize,
+    latest_news_scroll_pos: usize,
+}
+
 fn build_market_data_row<'a>(
     quote: &'a StockQuote<'a>,
     currency_symbol: &String,
@@ -110,7 +124,7 @@ fn build_market_data_row<'a>(
     .height(description_height)
 }
 
-fn draw(frame: &mut Frame, app_state: &AppState) {
+fn draw(frame: &mut Frame, app_state: &AppState, uistate: &UIState) {
     use Constraint::{Fill, Length, Min};
 
     let main_vertical_layout = Layout::vertical([Length(1), Min(0), Length(1)]);
@@ -118,8 +132,26 @@ fn draw(frame: &mut Frame, app_state: &AppState) {
     let middle_horizontal_layout = Layout::horizontal([Fill(1); 2]);
     let [market_data_area, latest_news_area] = middle_horizontal_layout.areas(main_area);
 
-    let market_data_block = Block::bordered().title("Realtime market data");
-    let latest_news_block = Block::bordered().title("Latest news");
+    let active_border_style = Style::default().fg(Color::Yellow);
+    let inactive_border_style = Style::default();
+
+    // conditional style based on active panel affecting border color only
+    let market_data_block = Block::bordered()
+        .title("Realtime market data")
+        .border_style(
+            if uistate.market_data_active_panel == MarketDataActivePanel::MarketData {
+                active_border_style
+            } else {
+                inactive_border_style
+            },
+        );
+    let latest_news_block = Block::bordered().title("Latest news").border_style(
+        if uistate.market_data_active_panel == MarketDataActivePanel::LatestNews {
+            active_border_style
+        } else {
+            inactive_border_style
+        },
+    );
 
     let market_data_inner_area = market_data_block.inner(market_data_area);
     let [market_data_table_area, market_data_status_area] =
@@ -136,6 +168,7 @@ fn draw(frame: &mut Frame, app_state: &AppState) {
     let rows = app_state
         .quotes
         .iter()
+        .skip(uistate.market_data_scroll_pos)
         .map(|quote| build_market_data_row(quote, &app_state.currency_symbol, description_width));
 
     let table = Table::new(rows, market_data_column_constraints)
@@ -158,6 +191,27 @@ fn draw(frame: &mut Frame, app_state: &AppState) {
         status_area,
     );
     frame.render_widget(table, market_data_table_area);
+
+    // we might as well construct this on every render for now
+    let mut market_data_scrollbar_state = ScrollbarState::default()
+        .content_length(app_state.quotes.len())
+        .position(uistate.market_data_scroll_pos)
+        .viewport_content_length(5);
+
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"))
+            .style(
+                if uistate.market_data_active_panel == MarketDataActivePanel::MarketData {
+                    active_border_style
+                } else {
+                    inactive_border_style
+                },
+            ),
+        market_data_area.inner(Margin::new(0, 1)),
+        &mut market_data_scrollbar_state,
+    );
     frame.render_widget(
         Line::styled(
             format!("Prices in {0}", app_state.currency_name_plural),
@@ -189,13 +243,50 @@ fn main() {
         currency_symbol: "₡".to_string(),
     };
 
+    let mut ui_state = UIState {
+        market_data_active_panel: MarketDataActivePanel::MarketData,
+        market_data_scroll_pos: 0,
+        latest_news_scroll_pos: 0,
+    };
+
     let mut terminal = ratatui::init();
     loop {
         terminal
-            .draw(|frame| draw(frame, &app_state))
+            .draw(|frame| draw(frame, &app_state, &ui_state))
             .expect("failed to draw frame");
-        if matches!(event::read().expect("failed to read event"), Event::Key(_)) {
-            break;
+        if let Event::Key(key) = event::read().expect("failed to read event") {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => break,
+                KeyCode::Left => {
+                    ui_state.market_data_active_panel = MarketDataActivePanel::MarketData
+                }
+                KeyCode::Right => {
+                    ui_state.market_data_active_panel = MarketDataActivePanel::LatestNews
+                }
+                KeyCode::Down => match ui_state.market_data_active_panel {
+                    MarketDataActivePanel::MarketData => {
+                        ui_state.market_data_scroll_pos = min(
+                            app_state.quotes.len().saturating_sub(1),
+                            ui_state.market_data_scroll_pos + 1,
+                        );
+                    }
+                    MarketDataActivePanel::LatestNews => {
+                        // TODO: Adjust when we have news data
+                        ui_state.latest_news_scroll_pos += 1;
+                    }
+                },
+                KeyCode::Up => match ui_state.market_data_active_panel {
+                    MarketDataActivePanel::MarketData => {
+                        ui_state.market_data_scroll_pos =
+                            ui_state.market_data_scroll_pos.saturating_sub(1);
+                    }
+                    MarketDataActivePanel::LatestNews => {
+                        ui_state.latest_news_scroll_pos =
+                            ui_state.latest_news_scroll_pos.saturating_sub(1);
+                    }
+                },
+                _ => {}
+            }
         }
     }
     ratatui::restore();
