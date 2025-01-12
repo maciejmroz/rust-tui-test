@@ -6,7 +6,8 @@ use ratatui::layout::{Layout, Margin};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{
-    Block, Borders, Cell, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    Wrap,
 };
 use ratatui::Frame;
 use std::cmp::{max, min};
@@ -26,6 +27,21 @@ impl Company {
             ticker: ticker.to_string(),
             name: name.to_string(),
             description: description.to_string(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct NewsItem {
+    title: String,
+    subtitle: String,
+}
+
+impl NewsItem {
+    fn new(title: &str, subtitle: &str) -> NewsItem {
+        NewsItem {
+            title: title.to_string(),
+            subtitle: subtitle.to_string(),
         }
     }
 }
@@ -74,6 +90,7 @@ struct AppState<'a> {
     quotes: Vec<StockQuote<'a>>,
     currency_name_plural: String,
     currency_symbol: String,
+    news: Vec<NewsItem>,
 }
 
 #[derive(PartialEq)]
@@ -121,30 +138,29 @@ fn build_market_data_row<'a>(
         }),
         Cell::from(description_text),
     ])
+    .style(Style::default().fg(Color::White))
     .height(description_height)
 }
 
 fn draw(frame: &mut Frame, app_state: &AppState, uistate: &UIState) {
     use Constraint::{Fill, Length, Min};
 
-    let main_vertical_layout = Layout::vertical([Length(1), Min(0), Length(1)]);
-    let [title_area, main_area, status_area] = main_vertical_layout.areas(frame.area());
-    let middle_horizontal_layout = Layout::horizontal([Fill(1); 2]);
+    let main_vertical_layout = Layout::vertical([Min(0), Length(1)]);
+    let [main_area, status_area] = main_vertical_layout.areas(frame.area());
+    let middle_horizontal_layout = Layout::horizontal([Fill(3), Fill(2)]);
     let [market_data_area, latest_news_area] = middle_horizontal_layout.areas(main_area);
 
-    let active_border_style = Style::default().fg(Color::Yellow);
+    let active_border_style = Style::default().fg(Color::Cyan);
     let inactive_border_style = Style::default();
 
     // conditional style based on active panel affecting border color only
-    let market_data_block = Block::bordered()
-        .title("Realtime market data")
-        .border_style(
-            if uistate.market_data_active_panel == MarketDataActivePanel::MarketData {
-                active_border_style
-            } else {
-                inactive_border_style
-            },
-        );
+    let market_data_block = Block::bordered().title("The Iron Ledger").border_style(
+        if uistate.market_data_active_panel == MarketDataActivePanel::MarketData {
+            active_border_style
+        } else {
+            inactive_border_style
+        },
+    );
     let latest_news_block = Block::bordered().title("Latest news").border_style(
         if uistate.market_data_active_panel == MarketDataActivePanel::LatestNews {
             active_border_style
@@ -154,6 +170,7 @@ fn draw(frame: &mut Frame, app_state: &AppState, uistate: &UIState) {
     );
 
     let market_data_inner_area = market_data_block.inner(market_data_area);
+    let latest_news_inner_area = latest_news_block.inner(latest_news_area);
     let [market_data_table_area, market_data_status_area] =
         Layout::vertical([Fill(1), Length(1)]).areas(market_data_inner_area);
 
@@ -175,22 +192,44 @@ fn draw(frame: &mut Frame, app_state: &AppState, uistate: &UIState) {
         .column_spacing(1)
         .header(
             Row::new(vec!["Ticker", "Name", "Price", "Change%", "Description"])
-                .style(Style::new().bold())
+                .style(Style::new().fg(Color::Gray).italic())
                 .bottom_margin(1),
         );
+
+    let news = Paragraph::new(
+        app_state
+            .news
+            .iter()
+            .skip(uistate.latest_news_scroll_pos)
+            .map(|news_item| {
+                let title = Line::from(news_item.title.as_str())
+                    .style(Style::default().fg(Color::White).bold());
+                let subtitle = Line::from(news_item.subtitle.as_str());
+                vec![title, subtitle, Line::from("")]
+            })
+            .flatten()
+            .collect::<Vec<Line>>(),
+    )
+    .wrap(Wrap { trim: true });
 
     frame.render_widget(latest_news_block, latest_news_area);
     frame.render_widget(market_data_block, market_data_area);
     frame.render_widget(
-        Line::styled("The Iron Ledger", (Color::Yellow, Modifier::BOLD))
-            .alignment(Alignment::Center),
-        title_area,
-    );
-    frame.render_widget(
-        Block::new().borders(Borders::TOP).title("Connected"),
+        Block::new()
+            .borders(Borders::TOP)
+            .title(
+                "↑↓ - Scroll Up/Down"
+                    .bg(Color::Cyan)
+                    .fg(Color::Black)
+                    .bold(),
+            )
+            .title("←→ - Switch Panels".bg(Color::Cyan).fg(Color::Black).bold())
+            .title("Esc/Q - Quit".bg(Color::Cyan).fg(Color::Black).bold())
+            .border_style(Style::default().fg(Color::Cyan)),
         status_area,
     );
     frame.render_widget(table, market_data_table_area);
+    frame.render_widget(news, latest_news_inner_area);
 
     // we might as well construct this on every render for now
     let mut market_data_scrollbar_state = ScrollbarState::default()
@@ -212,6 +251,26 @@ fn draw(frame: &mut Frame, app_state: &AppState, uistate: &UIState) {
         market_data_area.inner(Margin::new(0, 1)),
         &mut market_data_scrollbar_state,
     );
+
+    let mut latest_news_scrollbar_state = ScrollbarState::default()
+        .content_length(app_state.news.len())
+        .position(uistate.latest_news_scroll_pos)
+        .viewport_content_length(5);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"))
+            .style(
+                if uistate.market_data_active_panel == MarketDataActivePanel::LatestNews {
+                    active_border_style
+                } else {
+                    inactive_border_style
+                },
+            ),
+        latest_news_area.inner(Margin::new(0, 1)),
+        &mut latest_news_scrollbar_state,
+    );
+
     frame.render_widget(
         Line::styled(
             format!("Prices in {0}", app_state.currency_name_plural),
@@ -236,11 +295,35 @@ fn main() {
         Company::new("GHRT", "Gearheart Pharmaceuticals", "Develops medical tonics, aetheric remedies, and advanced prosthetic enhancements.")
     ];
 
+    let news = vec![
+        NewsItem::new(
+            "Aether Dynamics (AETH) Soars to Record High as Demand for Aether Propulsion Fuels Industrial Boom",
+            "Analysts predict sustained growth as governments invest heavily in aetheric infrastructure.",
+        ),
+        NewsItem::new(
+            "Nimbus & Sons Airship Co. (NASC) Unveils Luxury Dirigible Line, Shares Inflate by 15%",
+            "New \"Gilded Skies\" model caters to elite travelers, signaling a lucrative market shift.",
+        ),
+        NewsItem::new(
+            "Steamspire Foundry (SSF) and Gaslight Illumination Corp. (GLIM) Forge Alliance to Modernize Urban Steam Grids",
+            "The partnership aims to illuminate cities more efficiently, boosting investor confidence.",
+        ),
+        NewsItem::new(
+            "Clockwork Corsairs Ltd. (CWR) Faces Turbulence Amid Regulatory Crackdown on Autonomous Automaton Deployment",
+            "Shares dip 8% as concerns grow over compliance costs and international sanctions.",
+        ),
+        NewsItem::new(
+            "Ironclad Armaments (IRON) Secures Major Defense Contract; Cogmark Exchange Hits All-Time High",
+            "Market optimism surges as geopolitical tensions drive demand for mechanized weaponry.",
+        ),
+    ];
+
     let mut rng = rand::rng();
     let app_state = AppState {
         quotes: gen_quotes(&mut rng, &companies),
         currency_name_plural: "Cogmarks".to_string(),
         currency_symbol: "₡".to_string(),
+        news,
     };
 
     let mut ui_state = UIState {
@@ -256,7 +339,7 @@ fn main() {
             .expect("failed to draw frame");
         if let Event::Key(key) = event::read().expect("failed to read event") {
             match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => break,
+                KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => break,
                 KeyCode::Left => {
                     ui_state.market_data_active_panel = MarketDataActivePanel::MarketData
                 }
@@ -271,8 +354,10 @@ fn main() {
                         );
                     }
                     MarketDataActivePanel::LatestNews => {
-                        // TODO: Adjust when we have news data
-                        ui_state.latest_news_scroll_pos += 1;
+                        ui_state.latest_news_scroll_pos = min(
+                            app_state.news.len().saturating_sub(1),
+                            ui_state.latest_news_scroll_pos + 1,
+                        );
                     }
                 },
                 KeyCode::Up => match ui_state.market_data_active_panel {
